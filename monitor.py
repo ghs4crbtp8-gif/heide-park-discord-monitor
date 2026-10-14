@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Heide-Park API monitor; posts only changed API data to a Discord webhook."""
+"""Heide-Park API monitor with diagnostic HTTP errors and Discord notification on changes."""
 import datetime as dt
 import hashlib
 import json
@@ -23,13 +23,24 @@ HEADERS = {
 
 
 def request_json(url, payload, headers):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers, method='POST')
-    with urllib.request.urlopen(req, timeout=25) as response:
-        return json.load(response)
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode('utf-8'), headers=headers, method='POST'
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            # Some Discord webhook endpoints return empty responses.
+            content = response.read()
+            return json.loads(content) if content else {}
+    except urllib.error.HTTPError as exc:
+        target = 'Discord' if 'discord' in url else 'Heide-Park-API'
+        print(f'{target}: HTTP {exc.code}', file=sys.stderr)
+        print(f'Server: {exc.headers.get("Server", "unbekannt")}', file=sys.stderr)
+        print(f'Content-Type: {exc.headers.get("Content-Type", "unbekannt")}', file=sys.stderr)
+        print(f'CF-Ray: {exc.headers.get("CF-Ray", "nicht vorhanden")}', file=sys.stderr)
+        raise
 
 
 def normalize(value):
-    # Exclude common volatile metadata. This is not a validated capacity parser.
     ignored = {'request_token', 'timestamp', 'request_time', 'response_time', 'server_time', 'session_id'}
     if isinstance(value, dict):
         return {k: normalize(v) for k, v in sorted(value.items()) if k.lower() not in ignored}
@@ -40,7 +51,7 @@ def normalize(value):
 
 def main():
     webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
-    if not webhook.startswith('https://discord.com/api/webhooks/') and not webhook.startswith('https://discordapp.com/api/webhooks/'):
+    if not webhook.startswith(('https://discord.com/api/webhooks/', 'https://discordapp.com/api/webhooks/')):
         raise RuntimeError('DISCORD_WEBHOOK_URL fehlt oder ist ungültig')
     from zoneinfo import ZoneInfo
     day = dt.datetime.now(ZoneInfo('Europe/Berlin')).date().isoformat()
@@ -53,17 +64,7 @@ def main():
         'min_capacity': '1', 'version': '2', 'display_zero_capacity': '1',
         'start_date': day, 'end_date': day,
     }
-    
-try:
     data = request_json(API, payload, HEADERS)
-except urllib.error.HTTPError as e:
-    print(f"API HTTP-Status: {e.code}")
-    print(f"Server: {e.headers.get('Server', 'unbekannt')}")
-    print(f"Content-Type: {e.headers.get('Content-Type', 'unbekannt')}")
-    print(f"Request-ID: {e.headers.get('CF-Ray', 'nicht vorhanden')}")
-    raise
-
-    # Fail safe on common error shapes rather than treating errors as availability changes.
     if isinstance(data, dict) and (data.get('error') or data.get('errors')):
         raise RuntimeError('API meldet einen Fehler: ' + str(data.get('error') or data.get('errors'))[:200])
     digest = hashlib.sha256(json.dumps(normalize(data), sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
@@ -74,11 +75,11 @@ except urllib.error.HTTPError as e:
                    f'Datum: **{day}**\n'
                    'Die API-Antwort hat sich seit der letzten erfolgreichen Prüfung verändert. '
                    '**Das ist keine bestätigte neue Ticketverfügbarkeit.**')
-        request_json(webhook, {'content': message, 'allowed_mentions': {'parse': []}}, {'Content-Type': 'application/json', 'User-Agent': 'HeideParkMonitor/1.0'})
+        request_json(webhook, {'content': message, 'allowed_mentions': {'parse': []}},
+                     {'Content-Type': 'application/json', 'User-Agent': 'HeideParkMonitor/1.0'})
         print('Änderung an Discord gesendet')
     else:
         print('Erstprüfung (Baseline)' if not previous else 'Keine Änderung')
-    # Persist state only when changed. Github Actions commits this file back to repo.
     if changed:
         STATE.write_text(json.dumps({'date': day, 'digest': digest}, indent=2) + '\n')
 
