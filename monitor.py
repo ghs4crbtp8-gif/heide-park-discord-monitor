@@ -53,7 +53,16 @@ def main():
         'min_capacity': '1', 'version': '2', 'display_zero_capacity': '1',
         'start_date': day, 'end_date': day,
     }
+    
+try:
     data = request_json(API, payload, HEADERS)
+except urllib.error.HTTPError as e:
+    print(f"API HTTP-Status: {e.code}")
+    print(f"Server: {e.headers.get('Server', 'unbekannt')}")
+    print(f"Content-Type: {e.headers.get('Content-Type', 'unbekannt')}")
+    print(f"Request-ID: {e.headers.get('CF-Ray', 'nicht vorhanden')}")
+    raise
+
     # Fail safe on common error shapes rather than treating errors as availability changes.
     if isinstance(data, dict) and (data.get('error') or data.get('errors')):
         raise RuntimeError('API meldet einen Fehler: ' + str(data.get('error') or data.get('errors'))[:200])
